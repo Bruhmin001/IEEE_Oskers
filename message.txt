@@ -1,0 +1,134 @@
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+import pickle
+
+def load_and_preprocess_data(weather_file):
+    """
+    Loads and preprocesses the weather data.
+
+    Args:
+        weather_file (str): Path to the weather data CSV file.
+
+    Returns:
+        pandas.DataFrame: Processed DataFrame with the year as the index.
+    """
+    df_weather = pd.read_csv(weather_file)
+    # Convert year to index
+    df_weather.set_index("Year", inplace=True)
+    return df_weather
+
+def load_and_preprocess_yield_data(yield_file):
+    """
+    Loads and preprocesses the yield data.
+
+    Args:
+        yield_file (str): Path to the yield data CSV file.
+
+    Returns:
+        pandas.DataFrame: Processed DataFrame with the year as the index.
+    """
+    df_yield = pd.read_csv(yield_file)
+    return df_yield
+
+def calculate_seasonal_average(df, district):
+    """
+    Calculates the average temperature for each season for a given district.
+
+    Args:
+        df (pandas.DataFrame): DataFrame containing weather data.
+        district (str): District name.
+
+    Returns:
+        pandas.DataFrame: DataFrame with seasonal average temperatures.
+    """
+    df_district = df[df['Dist Name'] == district]
+    if df_district.empty:
+        return pd.DataFrame()
+
+    seasonal_data = pd.DataFrame(index=df_district.index)
+    seasonal_data['Summer'] = df_district[['MARCH MAXIMUM (Centigrate)', 'APRIL MAXIMUM (Centigrate)', 'MAY MAXIMUM (Centigrate)']].mean(axis=1)
+    seasonal_data['Monsoon'] = df_district[['JUNE MAXIMUM (Centigrate)', 'JULY MAXIMUM (Centigrate)', 'AUGUST MAXIMUM (Centigrate)', 'SEPTEMBER MAXIMUM (Centigrate)']].mean(axis=1)
+    seasonal_data['Winter'] = df_district[['OCTOBER MAXIMUM (Centigrate)', 'NOVEMBER MAXIMUM (Centigrate)', 'DECEMBER MAXIMUM (Centigrate)', 'JANUARY MAXIMUM (Centigrate)', 'FEBRUARY MAXIMUM (Centigrate)']].mean(axis=1)
+    return seasonal_data
+
+def forecast_yield(district, weather_df, historical_yield_data):
+    """
+    Forecasts yield based on historical weather data for a given district.
+
+    Args:
+        district (str): District name.
+        weather_df (pandas.DataFrame): DataFrame containing weather data.
+        historical_yield_data (pandas.DataFrame): DataFrame with historical yield data.
+
+    Returns:
+        pandas.DataFrame: Forecasted yield values.
+    """
+    seasonal_avg = calculate_seasonal_average(weather_df, district)
+
+    if seasonal_avg.empty:
+        print(f"No weather data available for {district}.")
+        return None
+
+    # Filter historical yield data for the district
+    historical_yield_data = historical_yield_data[historical_yield_data['Dist Name'] == district].copy()
+
+    if historical_yield_data.empty:
+        print(f"No historical yield data available for {district}.")
+        return seasonal_avg.iloc[-5:]
+        
+    # Ensure historical_yield_data has 'Year' as index
+    historical_yield_data = historical_yield_data.set_index("Year")
+    
+    # Merge seasonal average temperatures with historical yield data
+    combined_data = pd.merge(seasonal_avg, historical_yield_data['RICE YIELD (Kg per ha)'], left_index=True, right_index=True, how='inner')
+
+    if combined_data.empty:
+        print(f"No combined data available for {district} to perform forecasting.")
+        return seasonal_avg.iloc[-5:]
+
+    # Define target and exogenous variables
+    target = 'RICE YIELD (Kg per ha)'
+    exog_vars = ['Summer', 'Monsoon', 'Winter']
+
+    # Drop any rows with missing values
+    combined_data = combined_data[[target] + exog_vars].dropna()
+    
+    # Split data into training and testing sets
+    train = combined_data.iloc[:-5]
+    test = combined_data.iloc[-5:]
+
+    # Build and fit the SARIMAX model
+    try:
+        model = SARIMAX(train[target], exog=train[exog_vars], order=(1, 1, 1), seasonal_order=(1, 1, 1, 12))
+        results = model.fit(disp=False)  # Set disp=False to suppress convergence messages
+
+        # Save the model to a .pkl file
+        with open(f'{district}_sarimax_model.pkl', 'wb') as pkl_file:
+            pickle.dump(results, pkl_file)
+
+    except Exception as e:
+        print(f"An error occurred during model fitting for {district}: {e}")
+        return None
+
+    # Generate forecast
+    forecast = results.forecast(steps=5, exog=test[exog_vars])
+    return forecast
+
+# Load data
+weather_file = "temp.csv"
+df_weather = load_and_preprocess_data(weather_file)
+
+# Load historical yield data
+yield_file = "Y.csv"
+df_y = load_and_preprocess_yield_data(yield_file)
+
+# Get unique districts
+districts = df_y['Dist Name'].unique()
+
+# Forecast yield for each district
+for district in districts:
+    forecast = forecast_yield(district, df_weather, df_y)
+    if forecast is not None:
+        print(f"Yield Forecast for {district}:\n", forecast)
