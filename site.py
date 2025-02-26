@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import pickle
 import os
+import numpy as np
 
 def load_pkl(filename):
     if os.path.exists(filename):
@@ -10,77 +11,97 @@ def load_pkl(filename):
     return None
 
 def calculate_seasonal_average(df, district):
-    df_district = df[df['Dist Name'] == district]
+    df.columns = df.columns.str.strip()
+    df_district = df[df['Dist Name'].str.strip() == district]
+
     if df_district.empty:
+        st.error(f"No data found for district: {district}")
         return pd.DataFrame()
-    
-    seasonal_data = pd.DataFrame(index=df_district.index)
-    seasonal_data['Summer'] = df_district[['MARCH MAXIMUM (Centigrate)', 'APRIL MAXIMUM (Centigrate)', 'MAY MAXIMUM (Centigrate)']].mean(axis=1)
-    seasonal_data['Monsoon'] = df_district[['JUNE MAXIMUM (Centigrate)', 'JULY MAXIMUM (Centigrate)', 'AUGUST MAXIMUM (Centigrate)', 'SEPTEMBER MAXIMUM (Centigrate)']].mean(axis=1)
-    seasonal_data['Winter'] = df_district[['OCTOBER MAXIMUM (Centigrate)', 'NOVEMBER MAXIMUM (Centigrate)', 'DECEMBER MAXIMUM (Centigrate)', 'JANUARY MAXIMUM (Centigrate)', 'FEBRUARY MAXIMUM (Centigrate)']].mean(axis=1)
-    return seasonal_data
+
+    required_columns = {
+        'Summer': ['MARCH MAXIMUM (Centigrate)', 'APRIL MAXIMUM (Centigrate)', 'MAY MAXIMUM (Centigrate)'],
+        'Monsoon': ['JUNE MAXIMUM (Centigrate)', 'JULY MAXIMUM (Centigrate)', 'AUGUST MAXIMUM (Centigrate)', 'SEPTEMBER MAXIMUM (Centigrate)'],
+        'Winter': ['OCTOBER MAXIMUM (Centigrate)', 'NOVEMBER MAXIMUM (Centigrate)', 'DECEMBER MAXIMUM (Centigrate)', 'JANUARY MAXIMUM (Centigrate)', 'FEBRUARY MAXIMUM (Centigrate)']
+    }
+
+    seasonal_data = {}
+
+    for season, cols in required_columns.items():
+        available_cols = [col for col in cols if col in df_district.columns]
+        
+        if not available_cols:
+            seasonal_data[season] = np.nan
+            continue
+
+        df_district[available_cols] = df_district[available_cols].apply(pd.to_numeric, errors='coerce')
+        df_district[available_cols] = df_district[available_cols].fillna(df_district[available_cols].mean())
+
+        seasonal_data[season] = df_district[available_cols].mean(axis=1).values
+
+    return pd.DataFrame(seasonal_data, index=df_district.index)
 
 def main():
     st.title("District-wise Crop Yield Prediction")
     
-    # Load dataset
     file_path = 'combined_data.csv'
     if not os.path.exists(file_path):
         st.error("Dataset not found!")
         return
     
-    df = pd.read_csv(file_path)
-    st.write("### Step 1: Dataset Loaded")
-    st.dataframe(df.head())
+    try:
+        df = pd.read_csv(file_path)
+    except Exception as e:
+        st.error(f"Error loading dataset: {e}")
+        return
     
-    # Check if 'Dist Name' column exists
     if 'Dist Name' not in df.columns:
         st.error("Error: No 'Dist Name' column found in dataset!")
         return
     
-    # Select district
-    districts = df['Dist Name'].unique()
+    districts = sorted(df['Dist Name'].unique())
     selected_district = st.selectbox("Select a district:", districts)
     
     if selected_district:
-        st.write(f"### Step 2: Selected District - {selected_district}")
+        model_filename = f"models/{selected_district}_sarimax_model.pkl"
         
-        # Load prediction model specific to district
-        model_filename = f"{selected_district}_sarimax_model.pkl"
         model = load_pkl(model_filename)
-        
         if model is not None:
-            st.write("### Step 3: Model Loaded")
-            
-            # Calculate seasonal averages
-            seasonal_avg = calculate_seasonal_average(df, selected_district)
-            if seasonal_avg.empty:
-                st.error("No seasonal data available for the selected district!")
-                return
-            
-            st.write("### Step 4: Seasonal Averages")
-            st.dataframe(seasonal_avg.tail(5))
-            
-            # Add sliders for simulation
-            st.write("### Step 5: Adjust Seasonal Variables for Simulation")
-            for col in seasonal_avg.columns:
-                seasonal_avg[col] = st.slider(f"{col}", float(seasonal_avg[col].min()), float(seasonal_avg[col].max()), float(seasonal_avg[col].mean()))
-            
-            # Ensure exogenous data matches the forecast shape
-            exog_data = seasonal_avg.tail(5)
-            if len(exog_data) < 5:
-                st.error("Not enough exogenous data available for prediction!")
-                return
-            
-            # Make prediction
             try:
-                predictions = model.forecast(steps=5, exog=exog_data)
-                st.write("### Step 6: Predictions")
-                st.dataframe(pd.DataFrame(predictions, columns=['Predicted Yield']))
+                seasonal_avg = calculate_seasonal_average(df, selected_district)
+                
+                if seasonal_avg.empty:
+                    st.error("No seasonal data available for the selected district!")
+                    return
+                
+                adjusted_seasonal_data = {}
+                
+                for col in seasonal_avg.columns:
+                    col_data = seasonal_avg[col].dropna()
+                    if len(col_data) > 0:
+                        col_min = float(col_data.min())
+                        col_max = float(col_data.max())
+                        col_mean = float(col_data.mean())
+                        adjusted_value = st.slider(f"{col}", min_value=col_min, max_value=col_max, value=col_mean)
+                        adjusted_seasonal_data[col] = adjusted_value
+                    else:
+                        adjusted_seasonal_data[col] = 0.0
+                
+                exog_data = pd.DataFrame([adjusted_seasonal_data] * 5)
+                
+                try:
+                    if hasattr(model, 'exog_names') and model.exog_names is not None:
+                        if set(exog_data.columns) != set(model.exog_names):
+                            st.error(f"Exogenous variable mismatch! Model expects: {model.exog_names}")
+                            return
+                    predictions = model.forecast(steps=5, exog=exog_data)
+                    pred_df = pd.DataFrame(predictions)
+                    st.dataframe(pred_df)
+                except Exception as e:
+                    st.error(f"Prediction error: {e}")
             except Exception as e:
-                st.error(f"Prediction error: {e}")
+                st.error(f"Error calculating seasonal averages: {e}")
         else:
             st.error(f"Prediction model not found for {selected_district}!")
-    
+
 if __name__ == "__main__":
     main()

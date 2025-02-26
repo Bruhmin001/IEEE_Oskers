@@ -1,0 +1,100 @@
+import streamlit as st
+import pandas as pd
+import pickle
+import os
+
+def load_pkl(filename):
+    if os.path.exists(filename):
+        with open(filename, 'rb') as f:
+            return pickle.load(f)
+    return None
+
+def calculate_seasonal_average(df, district):
+    df_district = df[df['Dist Name'] == district]
+    if df_district.empty:
+        print(f"No data found for district: {district}")
+        return pd.DataFrame()
+
+    required_columns = {
+        'Summer': ['MARCH MAXIMUM (Centigrate)', 'APRIL MAXIMUM (Centigrate)', 'MAY MAXIMUM (Centigrate)'],
+        'Monsoon': ['JUNE MAXIMUM (Centigrate)', 'JULY MAXIMUM (Centigrate)', 'AUGUST MAXIMUM (Centigrate)', 'SEPTEMBER MAXIMUM (Centigrate)'],
+        'Winter': ['OCTOBER MAXIMUM (Centigrate)', 'NOVEMBER MAXIMUM (Centigrate)', 'DECEMBER MAXIMUM (Centigrate)', 
+                   'JANUARY MAXIMUM (Centigrate)', 'FEBRUARY MAXIMUM (Centigrate)']
+    }
+
+    seasonal_data = pd.DataFrame(index=df_district.index)
+
+    for season, cols in required_columns.items():
+        available_cols = [col for col in cols if col in df_district.columns]
+        if available_cols:
+            seasonal_data[season] = df_district[available_cols].mean(axis=1)
+        else:
+            st.write(f"Missing columns for {season} in {district}")
+
+    return seasonal_data
+
+
+def main():
+    st.title("District-wise Crop Yield Prediction")
+    
+    # Load dataset
+    file_path = 'combined_data.csv'
+    if not os.path.exists(file_path):
+        st.error("Dataset not found!")
+        return
+    
+    df = pd.read_csv(file_path)
+    st.write("### Step 1: Dataset Loaded")
+    st.dataframe(df.head())
+    
+    # Check if 'Dist Name' column exists
+    if 'Dist Name' not in df.columns:
+        st.error("Error: No 'Dist Name' column found in dataset!")
+        return
+    
+    # Select district
+    districts = df['Dist Name'].unique()
+    selected_district = st.selectbox("Select a district:", districts)
+    
+    if selected_district:
+        st.write(f"### Step 2: Selected District - {selected_district}")
+        
+        # Load prediction model specific to district
+        model_filename = f"{selected_district}_sarimax_model.pkl"
+        model = load_pkl(model_filename)
+        
+        if model is not None:
+            st.write("### Step 3: Model Loaded")
+            
+            # Calculate seasonal averages
+            seasonal_avg = calculate_seasonal_average(df, selected_district)
+            if seasonal_avg.empty:
+                st.error("No seasonal data available for the selected district!")
+                return
+            
+            st.write("### Step 4: Seasonal Averages")
+            st.dataframe(seasonal_avg.tail(5))
+            
+            # Add sliders for simulation
+            st.write("### Step 5: Adjust Seasonal Variables for Simulation")
+            for col in seasonal_avg.columns:
+                seasonal_avg[col] = st.slider(f"{col}", float(seasonal_avg[col].min()), float(seasonal_avg[col].max()), float(seasonal_avg[col].mean()))
+            
+            # Ensure exogenous data matches the forecast shape
+            exog_data = seasonal_avg.tail(5)
+            if len(exog_data) < 5:
+                st.error("Not enough exogenous data available for prediction!")
+                return
+            
+            # Make prediction
+            try:
+                predictions = model.forecast(steps=5, exog=exog_data)
+                st.write("### Step 6: Predictions")
+                st.dataframe(pd.DataFrame(predictions, columns=['Predicted Yield']))
+            except Exception as e:
+                st.error(f"Prediction error: {e}")
+        else:
+            st.error(f"Prediction model not found for {selected_district}!")
+    
+if __name__ == "__main__":
+    main()
